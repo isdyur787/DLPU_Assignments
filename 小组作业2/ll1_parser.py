@@ -1,297 +1,381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-LL(1)语法分析器
-By Group2 邵昱铭 王宝飞 孙智博 肖宇航
+LL(1) 语法分析器
+    自动推导终/非终结符
+    自动计算 FIRST / FOLLOW / SELECT
+    自动构造预测分析表
 """
 
-import re
-from collections import defaultdict, deque
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Union
 
 
 class LL1ParserManual:
 
-    # 邵昱铭
     def __init__(self):
-        self.grammar = {}  # 文法规则
-        self.terminals = set()  # 终结符集合
-        self.non_terminals = set()  # 非终结符集合
-        self.start_symbol = ''  # 开始符号
-        self.first_sets = {}  # First集合
-        self.follow_sets = {}  # Follow集合
-        self.select_sets = {}  # Select集合
-        self.predict_table = {}  # 预测分析表
-        self.epsilon = 'ε'  # 空符号
-        
-    def add_grammar_rule(self, left: str, right: str):
-        """添加文法规则"""
+        # 文法：A -> [alpha1, alpha2, ...]；alpha 是 List[str]
+        self.grammar: Dict[str, List[List[str]]] = {}
+        # 符号集合
+        self.terminals: Set[str] = set()
+        self.non_terminals: Set[str] = set()
+        # 起始符
+        self.start_symbol: str = ''
+        # 集合
+        self.first_sets: Dict[str, Set[str]] = {}
+        self.follow_sets: Dict[str, Set[str]] = {}
+        self.select_sets: Dict[str, Dict[int, Set[str]]] = {}
+        # 预测分析表：M[A][a] = 产生式右部（List[str]）或 None
+        self.predict_table: Dict[str, Dict[str, Optional[List[str]]]] = {}
+        # 冲突记录（可选，可供调试）
+        self.conflicts: List[Tuple[str, str, List[str], List[str]]] = []
+        # 空串记号
+        self.epsilon: str = 'ε'
+
+    # 文法录入与符号推导
+    # 邵昱铭
+    def add_grammar_rule(self, left: str, right: Union[str, List[str]]):
+
+        left = left.strip()
+        if not left:
+            return
+
         if left not in self.grammar:
             self.grammar[left] = []
-        
-        # 将右侧按空格分割
-        right_parts = right.split()
-        self.grammar[left].append(right_parts)
-        
-        # 更新终结符和非终结符集合
-        self.non_terminals.add(left)
-        
-        for symbol in right_parts:
-            if symbol != self.epsilon:
-                # 简单的终结符判断：小写字母或特殊符号
-                if symbol.islower() or symbol in '+-*/()[]{};=<>!&|':
-                    self.terminals.add(symbol)
-                else:
-                    self.non_terminals.add(symbol)
-    
+
+        if isinstance(right, list):
+            alpha = [s.strip() for s in right if s.strip()]
+            if len(alpha) == 0:
+                alpha = [self.epsilon]
+            self.grammar[left].append(alpha)
+        else:
+            r = right.strip()
+            if not r or r == self.epsilon:
+                self.grammar[left].append([self.epsilon])
+            else:
+                self.grammar[left].append(r.split())
+
+        # 每次增量更新一次符号集合，保证 GUI 解析后立即能看到集合
+        self._derive_symbols()
+
     def set_start_symbol(self, symbol: str):
-        """设置开始符号"""
-        self.start_symbol = symbol
-    
+        self.start_symbol = symbol.strip()
+
+    def _derive_symbols(self):
+        """
+        算法思路：依据 grammar 自动推导非终结符和终结符。
+        1. 非终结符 = 所有产生式的左部键集合
+        2. 终结符 = 所有右部出现过的符号 - 非终结符 - {ε}
+        """
+        self.non_terminals = set(self.grammar.keys())
+        rhs_symbols: Set[str] = set()
+        for prods in self.grammar.values():
+            for alpha in prods:
+                rhs_symbols.update(alpha)
+        self.terminals = {s for s in rhs_symbols if s not in self.non_terminals and s != self.epsilon}
+
+    # FIRST / FOLLOW / SELECT
+
     def compute_first_sets(self):
-        """计算First集合"""
-        # 初始化First集合
-        for symbol in self.non_terminals:
-            self.first_sets[symbol] = set()
-        
-        # 终结符的First集合是自身
-        for terminal in self.terminals:
-            self.first_sets[terminal] = {terminal}
-        
-        # 添加空符号的First集合
+
+        self._derive_symbols()
+
+        # 初始化
+        self.first_sets = {A: set() for A in self.non_terminals}
+        for a in self.terminals:
+            self.first_sets[a] = {a}
         self.first_sets[self.epsilon] = {self.epsilon}
-        
-        # 迭代计算First集合直到收敛
+
         changed = True
         while changed:
             changed = False
-            
-            for non_terminal in self.non_terminals:
-                old_first = self.first_sets[non_terminal].copy()
-                
-                for production in self.grammar[non_terminal]:
-                    # 计算产生式右侧的First集合
-                    first_of_production = self._compute_first_of_string(production)
-                    self.first_sets[non_terminal].update(first_of_production - {self.epsilon})
-                
-                if self.first_sets[non_terminal] != old_first:
+            for A, prods in self.grammar.items():
+                before = set(self.first_sets[A])
+                for alpha in prods:
+                    # A → ε
+                    if len(alpha) == 1 and alpha[0] == self.epsilon:
+                        self.first_sets[A].add(self.epsilon)
+                        continue
+
+                    nullable_prefix = True
+                    for X in alpha:
+                        FX = self.first_sets.get(X, set())
+                        # 若 X 尚未登记（非常少见），按“自成终结符”处理
+                        if not FX and X not in self.non_terminals and X != self.epsilon:
+                            FX = {X}
+                            self.first_sets[X] = {X}
+
+                        self.first_sets[A] |= (FX - {self.epsilon})
+                        if self.epsilon not in FX:
+                            nullable_prefix = False
+                            break
+
+                    if nullable_prefix:
+                        self.first_sets[A].add(self.epsilon)
+
+                if self.first_sets[A] != before:
                     changed = True
-    
-    def _compute_first_of_string(self, string: List[str]) -> Set[str]:
-        """计算字符串的First集合"""
-        if not string:
+
+    def _first_of_sequence(self, seq: List[str]) -> Set[str]:
+        """FIRST(符号串)，空或全可空 => 包含 ε"""
+        if not seq:
             return {self.epsilon}
-        
-        result = set()
-        all_have_epsilon = True
-        
-        for symbol in string:
-            if symbol in self.first_sets:
-                result.update(self.first_sets[symbol] - {self.epsilon})
-                if self.epsilon not in self.first_sets[symbol]:
-                    all_have_epsilon = False
-                    break
-            else:
-                all_have_epsilon = False
+
+        result: Set[str] = set()
+        nullable_prefix = True
+        for X in seq:
+            FX = self.first_sets.get(X, set())
+            if not FX and X not in self.non_terminals and X != self.epsilon:
+                FX = {X}
+                self.first_sets[X] = {X}
+
+            result |= (FX - {self.epsilon})
+            if self.epsilon not in FX:
+                nullable_prefix = False
                 break
-        
-        if all_have_epsilon:
+
+        if nullable_prefix:
             result.add(self.epsilon)
-        
         return result
 
     # 肖宇航
     def compute_follow_sets(self):
-        """计算Follow集合"""
-        # 手动设置正确的Follow集合
-        self.follow_sets = {
-            'E': {'$', ')'},
-            "E'": {'$', ')'},
-            'T': {'+', '$', ')'},
-            "T'": {'+', '$', ')'},
-            'F': {'*', '+', '$', ')'}
-        }
-    
+        """
+        标准 FOLLOW 迭代：
+        - '$' ∈ FOLLOW(S)
+        - - A → α B β ：FIRST(β) − {ε} ⊆ FOLLOW(B)
+        - 若 β ⇒* ε，则 FOLLOW(A) ⊆ FOLLOW(B)
+        """
+        if not self.start_symbol:
+            raise ValueError("请先设置开始符号 start_symbol")
+
+        self._derive_symbols()
+        if not self.first_sets:
+            self.compute_first_sets()
+
+        self.follow_sets = {A: set() for A in self.non_terminals}
+        self.follow_sets[self.start_symbol].add('$')
+
+        changed = True
+        while changed:
+            changed = False
+            for A, prods in self.grammar.items():
+                for alpha in prods:
+                    n = len(alpha)
+                    for i, B in enumerate(alpha):
+                        if B not in self.non_terminals:
+                            continue
+                        beta = alpha[i + 1:]
+                        first_beta = self._first_of_sequence(beta)
+                        before = set(self.follow_sets[B])
+
+                        # FIRST(β) \ {ε}
+                        self.follow_sets[B] |= (first_beta - {self.epsilon})
+
+                        # 若 β 可空或 β 为空，FOLLOW(A) ⊆ FOLLOW(B)
+                        if (self.epsilon in first_beta) or (len(beta) == 0):
+                            self.follow_sets[B] |= self.follow_sets[A]
+
+                        if self.follow_sets[B] != before:
+                            changed = True
+
     def compute_select_sets(self):
-        """计算Select集合"""
+        """
+        SELECT(A→α) = FIRST(α)（若含 ε，再并 FOLLOW(A)）
+        以“产生式在其候选列表中的索引”为键保存每条产生式的 SELECT
+        """
+        if not self.first_sets:
+            self.compute_first_sets()
+        if not self.follow_sets:
+            self.compute_follow_sets()
+
         self.select_sets = {}
-        
-        for non_terminal in self.non_terminals:
-            self.select_sets[non_terminal] = {}
-            for i, production in enumerate(self.grammar[non_terminal]):
-                # 计算产生式的First集合
-                first_of_production = self._compute_first_of_string(production)
-                
-                # 如果ε在First(α)中，则Select(A→α) = First(α) ∪ Follow(A)
-                if self.epsilon in first_of_production:
-                    select_set = first_of_production.union(self.follow_sets[non_terminal])
+        for A, prods in self.grammar.items():
+            self.select_sets[A] = {}
+            for idx, alpha in enumerate(prods):
+                f = self._first_of_sequence(alpha)
+                if self.epsilon in f:
+                    self.select_sets[A][idx] = (f - {self.epsilon}) | self.follow_sets[A]
                 else:
-                    # 否则Select(A→α) = First(α)
-                    select_set = first_of_production
-                
-                # 存储Select集合（使用产生式索引作为键）
-                self.select_sets[non_terminal][i] = select_set
-    
+                    self.select_sets[A][idx] = f
 
+    # 预测分析表
+    # 孙智博
     def build_predict_table(self):
-        """构造预测分析表"""
-        # 初始化预测分析表
-        self.predict_table = {}
-        
-        for non_terminal in self.non_terminals:
-            self.predict_table[non_terminal] = {}
-            for terminal in self.terminals:
-                self.predict_table[non_terminal][terminal] = None
-            self.predict_table[non_terminal]['$'] = None
-        
-        # 填充预测分析表
-        for non_terminal in self.non_terminals:
-            for production in self.grammar[non_terminal]:
-                first_of_production = self._compute_first_of_string(production)
-                
-                # 对First(α)中的每个终结符a，将A→α加入M[A,a]
-                for terminal in first_of_production - {self.epsilon}:
-                    if self.predict_table[non_terminal][terminal] is not None:
-                        print(f"警告：文法不是LL(1)的！冲突在M[{non_terminal}, {terminal}]")
-                    self.predict_table[non_terminal][terminal] = production
-                
-                # 如果ε在First(α)中，对Follow(A)中的每个终结符b，将A→α加入M[A,b]
-                if self.epsilon in first_of_production:
-                    for terminal in self.follow_sets[non_terminal]:
-                        if self.predict_table[non_terminal][terminal] is not None:
-                            print(f"警告：文法不是LL(1)的！冲突在M[{non_terminal}, {terminal}]")
-                        self.predict_table[non_terminal][terminal] = production
+        """
+        依据 SELECT 填 M[A, a]。若同一格出现多条产生式，记录冲突并打印警告。
+        GUI 会用 self.predict_table[非终结符][终结符或'$'] 读取。
+        """
+        if not self.select_sets:
+            self.compute_select_sets()
 
+        # 初始化
+        self.predict_table = {}
+        self.conflicts = []
+        terminals_plus_end = sorted(self.terminals | {'$'})
+
+        for A in self.non_terminals:
+            self.predict_table[A] = {t: None for t in terminals_plus_end}
+
+        # 填表
+        for A, prods in self.grammar.items():
+            for idx, alpha in enumerate(prods):
+                select = self.select_sets[A][idx]
+                for a in select:
+                    # 只对“出现在表头的终结符或 $”填表
+                    if a not in self.predict_table[A]:
+                        # 若某些符号尚未登记为“终结符”，也补入（健壮性）
+                        for row in self.predict_table.values():
+                            row.setdefault(a, None)
+
+                    cell = self.predict_table[A][a]
+                    if cell is not None:
+                        # 冲突：已有规则
+                        self.conflicts.append((A, a, cell, alpha))
+                        print(f"警告：文法可能不是 LL(1)！冲突在 M[{A}, {a}]，"
+                              f"已存在 {A}→{' '.join(cell)}，又遇到 {A}→{' '.join(alpha)}")
+                    else:
+                        self.predict_table[A][a] = alpha
+
+    # 分析
     # 王宝飞
-    def analyze(self, input_string: str) -> Tuple[bool, List[Dict]]:
-        """LL(1)分析算法"""
-        # 初始化栈和分析过程记录
-        stack = ['$', self.start_symbol]
-        input_tokens = input_string.split() + ['$']
+    def analyze(self, input_string: str) -> Tuple[bool, List[Dict[str, str]]]:
+        """
+        LL(1) 分析：返回 (是否接受, 步骤记录)
+        """
+        if not self.predict_table:
+            # 若还未构造表，则自动完成必要步骤
+            self.compute_first_sets()
+            self.compute_follow_sets()
+            self.compute_select_sets()
+            self.build_predict_table()
+
+        tokens = input_string.split() if input_string.strip() else []
+        tokens.append('$')
+
+        stack: List[str] = ['$', self.start_symbol]
         input_index = 0
-        analysis_steps = []
-        
-        while len(stack) > 1:  # 栈中还有非$符号
+        steps: List[Dict[str, str]] = []
+
+        # 与原版风格保持一致：当栈中还存在非 $ 符号时继续
+        while len(stack) > 1:
             step = {
-                'step': len(analysis_steps) + 1,
+                'step': str(len(steps) + 1),
                 'stack': ' '.join(stack),
-                'input': ' '.join(input_tokens[input_index:]),
+                'input': ' '.join(tokens[input_index:]),
                 'action': ''
             }
-            
+
             X = stack[-1]
-            a = input_tokens[input_index] if input_index < len(input_tokens) else '$'
-            
-            if X in self.terminals or X == '$':
+            a = tokens[input_index] if input_index < len(tokens) else '$'
+
+            # 终结符或 $
+            if X == '$' or X in self.terminals:
                 if X == a:
                     stack.pop()
                     input_index += 1
                     step['action'] = f'匹配 {a}'
                 else:
                     step['action'] = f'错误：期望 {X}，得到 {a}'
-                    analysis_steps.append(step)
-                    return False, analysis_steps
+                    steps.append(step)
+                    return False, steps
+
+            # 非终结符
             elif X in self.non_terminals:
-                if a in self.predict_table[X] and self.predict_table[X][a] is not None:
-                    production = self.predict_table[X][a]
-                    stack.pop()
-                    
-                    # 将产生式右侧符号逆序入栈（除了ε）
-                    for symbol in reversed(production):
-                        if symbol != self.epsilon:
-                            stack.append(symbol)
-                    
-                    step['action'] = f'使用规则 {X} → {" ".join(production)}'
-                else:
+                row = self.predict_table.get(X, {})
+                production = row.get(a, None)
+                if production is None:
                     step['action'] = f'错误：M[{X}, {a}]为空'
-                    analysis_steps.append(step)
-                    return False, analysis_steps
+                    steps.append(step)
+                    return False, steps
+
+                stack.pop()
+                # 右部逆序入栈（跳过 ε）
+                for sym in reversed(production):
+                    if sym != self.epsilon:
+                        stack.append(sym)
+                step['action'] = f'使用规则 {X} → {" ".join(production)}'
+
             else:
                 step['action'] = f'错误：未知符号 {X}'
-                analysis_steps.append(step)
-                return False, analysis_steps
-            
-            analysis_steps.append(step)
-        
-        # 检查是否成功分析
-        if input_tokens[input_index] == '$':
-            analysis_steps.append({
-                'step': len(analysis_steps) + 1,
+                steps.append(step)
+                return False, steps
+
+            steps.append(step)
+
+        # 结束：只剩 $，且输入也到 $
+        if tokens[input_index] == '$':
+            steps.append({
+                'step': str(len(steps) + 1),
                 'stack': '$',
                 'input': '$',
                 'action': '接受'
             })
-            return True, analysis_steps
+            return True, steps
         else:
-            return False, analysis_steps
+            # 栈空但输入未消费完（理论上不会出现于 LL(1) 正常流程）
+            steps.append({
+                'step': str(len(steps) + 1),
+                'stack': '$',
+                'input': ' '.join(tokens[input_index:]),
+                'action': '错误：输入未完全匹配'
+            })
+            return False, steps
 
-    # 孙智博
+    # 信息导出
     def get_grammar_info(self) -> Dict:
-        """获取文法信息"""
         return {
-            'grammar': self.grammar,
-            'terminals': list(self.terminals),
-            'non_terminals': list(self.non_terminals),
+            'grammar': {A: [['ε'] if (len(alpha) == 1 and alpha[0] == self.epsilon) else alpha
+                            for alpha in prods]
+                        for A, prods in self.grammar.items()},
+            'terminals': sorted(list(self.terminals)),
+            'non_terminals': sorted(list(self.non_terminals)),
             'start_symbol': self.start_symbol,
-            'first_sets': {k: list(v) for k, v in self.first_sets.items()},
-            'follow_sets': {k: list(v) for k, v in self.follow_sets.items()},
-            'select_sets': {k: {str(i): list(v) for i, v in vs.items()} for k, vs in self.select_sets.items()},
-            'predict_table': self.predict_table
+            'first_sets': {k: sorted(list(v)) for k, v in self.first_sets.items()
+                           if k in self.non_terminals},
+            'follow_sets': {k: sorted(list(v)) for k, v in self.follow_sets.items()},
+            'select_sets': {A: {str(i): sorted(list(s)) for i, s in d.items()}
+                            for A, d in self.select_sets.items()},
+            'predict_table': {A: {a: (None if rhs is None else rhs)
+                                  for a, rhs in row.items()}
+                              for A, row in self.predict_table.items()},
+            'conflicts': [{'A': A, 'a': a,
+                           'exist': ' '.join(exist),
+                           'new': ' '.join(new)}
+                          for (A, a, exist, new) in self.conflicts]
         }
 
 
+
+#测试
 def create_sample_grammar_manual():
-    """创建示例文法 - 手动版本"""
-    parser = LL1ParserManual()
-    
-    # 示例文法：E → E + T | T
-    #         T → T * F | F  
-    #         F → ( E ) | id
-    
-    # 消除左递归后的文法：
-    parser.add_grammar_rule('E', 'T E\'')
-    parser.add_grammar_rule('E\'', '+ T E\'')
-    parser.add_grammar_rule('E\'', 'ε')
-    parser.add_grammar_rule('T', 'F T\'')
-    parser.add_grammar_rule('T\'', '* F T\'')
-    parser.add_grammar_rule('T\'', 'ε')
-    parser.add_grammar_rule('F', '( E )')
-    parser.add_grammar_rule('F', 'id')
-    
-    parser.set_start_symbol('E')
-    
-    return parser
+    p = LL1ParserManual()
+    p.add_grammar_rule('E',  "T E'")
+    p.add_grammar_rule("E'", "+ T E'")
+    p.add_grammar_rule("E'", "ε")
+    p.add_grammar_rule('T',  "F T'")
+    p.add_grammar_rule("T'", "* F T'")
+    p.add_grammar_rule("T'", "ε")
+    p.add_grammar_rule('F',  "( E )")
+    p.add_grammar_rule('F',  "id")
+    p.set_start_symbol('E')
+    return p
 
-
+#自测
 if __name__ == "__main__":
-    # 测试示例
     parser = create_sample_grammar_manual()
-    
-    # 计算First和Follow集合
     parser.compute_first_sets()
     parser.compute_follow_sets()
-    
-    # 显示First和Follow集合
-    print("First集合:")
-    for symbol, first_set in parser.first_sets.items():
-        if symbol in parser.non_terminals:
-            print(f"First({symbol}) = {{{', '.join(sorted(first_set))}}}")
-    
-    print("\nFollow集合:")
-    for symbol, follow_set in parser.follow_sets.items():
-        if symbol in parser.non_terminals:
-            print(f"Follow({symbol}) = {{{', '.join(sorted(follow_set))}}}")
-    
-    # 构造预测分析表
+    parser.compute_select_sets()
     parser.build_predict_table()
-    
-    # 测试分析
-    test_inputs = ["id", "id + id", "id * id", "id + id * id"]
-    
-    for test_input in test_inputs:
-        print(f"\n测试输入: {test_input}")
-        success, steps = parser.analyze(test_input)
-        print(f"结果: {'接受' if success else '拒绝'}")
-        
-        if success:
-            print("分析过程:")
-            for step in steps:
-                print(f"  步骤 {step['step']}: 栈={step['stack']}, 输入={step['input']}, 动作={step['action']}")
+
+    print("终结符：", sorted(parser.terminals))
+    print("非终结符：", sorted(parser.non_terminals))
+    for A in sorted(parser.non_terminals):
+        print(f"FIRST({A}) = {sorted(parser.first_sets[A])}")
+    for A in sorted(parser.non_terminals):
+        print(f"FOLLOW({A}) = {sorted(parser.follow_sets[A])}")
+
+    ok, steps = parser.analyze("id + id * id")
+    print("结果：", "接受" if ok else "拒绝")
+    for s in steps:
+        print(f"{s['step']:>2} | 栈= [{s['stack']}], 输入= [{s['input']}], 动作= {s['action']}")
