@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LR(0) 语法分析器</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>LR(0) 语法分析器</h1>
+        <p class="subtitle">By 二组 邵昱铭 王宝飞 孙智博 肖宇航</p>
+      </header>
+
+      <div class="main-content">
+        <!-- 左侧：输入区域 -->
+        <div class="input-section">
+          <div class="panel">
+            <h2>文法输入</h2>
+            <div class="toolbar">
+              <button id="loadGrammarBtn" class="btn btn-primary">
+                从文件加载文法
+              </button>
+              <input
+                type="file"
+                id="grammarFileInput"
+                accept=".txt"
+                style="display: none"
+              />
+              <button id="clearGrammarBtn" class="btn btn-secondary">
+                清空
+              </button>
+            </div>
+            <textarea
+              id="grammarInput"
+              placeholder="请输入文法规则，每行一条，格式：S -> a A | b B&#10;例如：&#10;S -> E&#10;E -> E + T | T&#10;T -> T * F | F&#10;F -> ( E ) | id"
+            ></textarea>
+            <div class="info-text">
+              <strong>格式说明：</strong>使用 -> 表示产生式，|
+              分隔多个选择，空产生式用 ε 表示
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>输入串</h2>
+            <div class="toolbar">
+              <button id="loadSentenceBtn" class="btn btn-primary">
+                从文件加载句子
+              </button>
+              <input
+                type="file"
+                id="sentenceFileInput"
+                accept=".txt"
+                style="display: none"
+              />
+              <button id="clearSentenceBtn" class="btn btn-secondary">
+                清空
+              </button>
+            </div>
+            <textarea
+              id="sentenceInput"
+              placeholder="请输入要分析的句子，用空格分隔符号&#10;例如：id + id * id"
+            ></textarea>
+          </div>
+
+          <div class="panel">
+            <button id="analyzeBtn" class="btn btn-success btn-large">
+              开始分析
+            </button>
+            <button id="constructTableBtn" class="btn btn-info btn-large">
+              构造分析表
+            </button>
+          </div>
+        </div>
+
+        <!-- 右侧：结果显示区域 -->
+        <div class="output-section">
+          <div class="panel">
+            <h2>LR(0) 项目集规范族</h2>
+            <div id="itemSetsOutput" class="output-box"></div>
+          </div>
+
+          <div class="panel">
+            <h2>LR(0) 分析表</h2>
+            <div id="tableOutput" class="output-box table-container"></div>
+          </div>
+
+          <div class="panel">
+            <h2>分析过程</h2>
+            <div id="processOutput" class="output-box"></div>
+          </div>
+
+          <div class="panel">
+            <h2>分析结果</h2>
+            <div id="resultOutput" class="output-box"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="lr0_parser.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
